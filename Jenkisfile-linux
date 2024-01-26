@@ -1,0 +1,61 @@
+def remote = [:]
+remote.name = 'server3'
+remote.host = '174.142.206.137'
+remote.allowAnyHosts = true
+
+node {
+    // Configuración de Slack
+    def slackConfig = [
+       channel: '#jenkins2',
+       tokenCredentialId: 'slack-token'
+   ]
+
+    stage('Descargar código') {
+        def mvnHome = tool 'M3'
+        env.PATH = "${mvnHome}/bin:${env.PATH}"
+        sh 'rm -rf *'
+        checkout scm
+        sh "mvn clean compile"
+    }
+    stage('Instalar - develop') {
+        sh "mvn install -Dmaven.test.skip=true"
+    }
+            // -- ETAPA: analizar con Sonar - qa
+        stage('SonarQube Analysis') {
+            def mvn = tool 'M3';
+            withSonarQubeEnv('Sonarq') {
+                sh "mvn clean package sonar:sonar"
+            }
+        }
+        stage("Quality Gate"){
+          timeout(time: 1, unit: 'HOURS') {
+        def qg= waitForQualityGate()
+              if (qg.status != 'OK') {
+                slackSend(color: 'danger',
+                    message: "Error en el análisis de SonarQube: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    channel: slackConfig.channel, tokenCredentialId: slackConfig.tokenCredentialId)
+                  error "Error en el análisis de SonarQube"
+              }
+          }
+      }
+
+    stage('Copiar a servidor externo - develop') {
+
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'jenkins2-id-server3',
+                    keyFileVariable: 'sshKey',
+                    usernameVariable: 'userName')]) {
+                    remote.user = userName
+                    remote.identityFile = sshKey
+                    sshPut remote: remote,
+                    from: 'target/', filterRegex: /.war$/, into: "/opt/dockers/wildflyfish"
+                    sshCommand remote: remote,
+                    command: 'docker-compose -f /opt/dockers/wildflyfish/docker-compose.yml down'
+                    sshCommand remote: remote,
+                    command: 'docker-compose -f /opt/dockers/wildflyfish/docker-compose.yml up -d'
+         }
+
+    }
+
+}
+
